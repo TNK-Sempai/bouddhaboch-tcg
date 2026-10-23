@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="color-scheme" content="light dark">
+<title>BouddhaBoch-TCG</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- Écran de verrouillage -->
+<div id="lock" class="lock">
+  <div class="lock-art" aria-hidden="true"><img src="assets/banner.jpg" alt=""></div>
+  <form id="lock-form" class="lock-panel" autocomplete="off">
+    <div class="brand">
+      <span class="brand-name">BouddhaBoch-TCG</span>
+      <span class="brand-sub">Collection privée</span>
+    </div>
+    <div class="lock-body">
+      <h1 class="lock-title">Coffre<br>verrouillé</h1>
+      <p class="lock-text">Entre ton code pour voir et modifier la collection. Sans code, la page ne charge aucune donnée.</p>
+      <p id="demo-note" class="lock-demo" hidden>Mode démo : aucune API n'est configurée dans config.js. N'importe quel code ouvre un coffre vide pour tester, rien n'est enregistré.</p>
+      <label for="code" class="lock-label">Code d'accès</label>
+      <input id="code" name="code" type="password" class="lock-input" autocomplete="current-password" required>
+      <p id="lock-error" class="lock-error" role="alert" hidden></p>
+      <button id="lock-submit" type="submit" class="btn btn-amber btn-lg">Ouvrir le coffre</button>
+      <p class="lock-hint">Après 5 codes faux, l'accès se bloque 15 minutes.</p>
+    </div>
+  </form>
+</div>
+
+<!-- Application -->
+<div id="shell" class="shell" hidden>
+  <nav class="side" aria-label="Navigation">
+    <div class="brand">
+      <span class="brand-name">BouddhaBoch-TCG</span>
+      <span class="brand-sub">Collection privée</span>
+    </div>
+    <div class="side-group">
+      <span class="side-label">Collection</span>
+      <div id="side-nav" class="side-nav"></div>
+    </div>
+    <div class="side-bottom">
+      <span class="side-label">À surveiller</span>
+      <div class="side-count"><span>Prix à relever</span><span id="side-stale" class="side-num amber">0</span></div>
+      <div class="side-count"><span>Au grading</span><span id="side-grading" class="side-num">0</span></div>
+      <div class="side-actions">
+        <button type="button" class="side-link" data-action="theme">Thème : <span class="theme-label">auto</span></button>
+        <button type="button" class="side-link" data-action="lock">Verrouiller</button>
+      </div>
+    </div>
+  </nav>
+
+  <header class="topbar">
+    <div class="topbar-row">
+      <div class="brand">
+        <span class="brand-name">BouddhaBoch-TCG</span>
+        <span class="brand-sub">Collection privée</span>
+      </div>
+      <div class="topbar-actions">
+        <button type="button" class="top-btn" data-action="theme" aria-label="Changer de thème"><span class="theme-label">auto</span></button>
+        <button type="button" class="top-btn" data-action="lock">Verrouiller</button>
+      </div>
+    </div>
+    <div id="top-nav" class="top-nav" role="group" aria-label="Navigation"></div>
+    <span id="top-counts" class="top-counts"></span>
+  </header>
+
+  <main class="main">
+    <div class="banner">
+      <img src="assets/banner.jpg" alt="">
+      <div class="banner-text">
+        <span id="kicker" class="banner-kicker"></span>
+        <h1 id="title" class="banner-title"></h1>
+      </div>
+    </div>
+    <p id="demo-banner" class="demo-banner" hidden>Mode démo : rien n'est enregistré, tout disparaît en rechargeant la page.</p>
+    <div id="view" class="view"></div>
+    <footer class="foot">BouddhaBoch-TCG · données stockées dans le Google Sheet privé</footer>
+  </main>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
