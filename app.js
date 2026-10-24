@@ -125,13 +125,47 @@
       detail: [a.reference, a.variante, a.langue].filter(filled).join(' · '), licence: a.licence, type: a.type, qte: q,
       prix_revient: round2(costOf(a) / stock * q), prix_vente: num(v.prix_vente), commission: num(v.commission),
       port: num(v.port), emballage: num(v.emballage), acrylique_facture: num(v.acrylique_facture), acrylique_cout: num(v.acrylique_cout),
-      plateforme: v.plateforme || '', date_vente: v.date_vente || todayISO(), date_achat: a.date_achat
+      plateforme: v.plateforme || '', date_vente: v.date_vente || todayISO(), date_achat: a.date_achat, statut_avant: a.statut || 'Collection'
     };
     var ratio = (stock - q) / stock;
-    FEE_KEYS.forEach(function (k) { if (filled(a[k])) { a[k] = round2(num(a[k]) * ratio); } });
+    var removed = {};
+    FEE_KEYS.forEach(function (k) {
+      if (!filled(a[k])) { return; }
+      var before = num(a[k]);
+      a[k] = round2(before * ratio);
+      removed[k] = round2(before - a[k]);
+    });
+    row.frais_retires = JSON.stringify(removed);
     a.qte = stock - q;
     if (a.qte === 0) { a.statut = 'Vendu'; }
     return row;
+  }
+
+  /* Correction d'une vente : même règle que le serveur. Pour défaire une vente, il faut savoir ce qu'elle a retiré
+     à l'article (frais_retires, statut_avant) et que l'article existe encore ; sinon la quantité reste figée. */
+  var SALE_FREE = ' Tu peux encore corriger le prix, les frais, la date et la plateforme.';
+  var SALE_OLD = 'cette vente a été enregistrée avant le suivi des frais retirés à l\'article, on ne sait donc pas exactement quoi lui rendre.' + SALE_FREE;
+  var SALE_GONE = 'l\'article d\'origine a été supprimé, il n\'y a plus de fiche où remettre les pièces.' + SALE_FREE;
+  function saleRemoved(v) {
+    if (!filled(v.frais_retires)) { return null; }
+    try {
+      var o = JSON.parse(v.frais_retires);
+      return o && typeof o === 'object' && !Array.isArray(o) ? o : null;
+    } catch (e) { return null; }
+  }
+  /** Ce qu'il faut pour défaire la vente v ({ a, removed }), ou { reason } quand ce n'est pas possible. */
+  function saleUndoContext(v, articles) {
+    var removed = saleRemoved(v);
+    if (!removed) { return { reason: SALE_OLD }; }
+    var a = articles.filter(function (x) { return String(x.id) === String(v.article_id); })[0];
+    if (!a) { return { reason: SALE_GONE }; }
+    return { a: a, removed: removed };
+  }
+  /** Rend à l'article a (modifié sur place) les pièces et les frais que la vente v lui avait retirés. */
+  function undoSale(a, v, removed) {
+    a.qte = qtyOf(a) + Math.round(num(v.qte));
+    Object.keys(removed).forEach(function (k) { if (FEE_KEYS.indexOf(k) !== -1) { a[k] = round2(num(a[k]) + num(removed[k])); } });
+    if (a.statut === 'Vendu' && filled(v.statut_avant)) { a.statut = v.statut_avant; }
   }
 
   /* ================================================================
@@ -145,6 +179,11 @@
     handle: function (action, p) {
       var db = Demo.db || (Demo.db = JSON.parse(JSON.stringify(SAMPLE)));
       var copy = function (x) { return JSON.parse(JSON.stringify(x)); };
+      var saleById = function (id) {
+        var found = db.ventes.filter(function (x) { return x.id === id; })[0];
+        if (!found) { throw new Error('Vente introuvable.'); }
+        return found;
+      };
       switch (action) {
         case 'login': return { ok: true, token: 'demo' };
         case 'load': return { ok: true, articles: copy(db.articles), ventes: copy(db.ventes), prix: copy(db.prix), histo: copy(db.histo) };
@@ -170,6 +209,35 @@
           var art = db.articles.filter(function (x) { return x.id === p.id; })[0];
           if (!art) { throw new Error('Article introuvable.'); }
           db.ventes.push(applySale(art, p.vente));
+          return { ok: true };
+        }
+        case 'updateSale': {
+          var sale = saleById(p.id);
+          var vq = filled(p.vente.qte) ? Math.round(num(p.vente.qte)) : num(sale.qte);
+          if (!(vq >= 1)) { throw new Error('La quantité vendue doit être d\'au moins 1.'); }
+          var ctx = saleUndoContext(sale, db.articles);
+          if (ctx.reason) {
+            if (vq !== num(sale.qte)) { throw new Error('Impossible de changer la quantité : ' + ctx.reason); }
+          } else {
+            // Travail sur une copie : en cas d'erreur, l'article reste tel quel (comme côté serveur)
+            var draft = copy(ctx.a);
+            undoSale(draft, sale, ctx.removed);
+            if (vq > qtyOf(draft)) { throw new Error('Il n\'y a que ' + qtyOf(draft) + ' pièce(s) disponible(s) pour cet article, cette vente comprise.'); }
+            var redo = applySale(draft, Object.assign({}, p.vente, { qte: vq }));
+            Object.assign(ctx.a, draft);
+            ['qte', 'prix_revient', 'frais_retires', 'statut_avant'].forEach(function (k) { sale[k] = redo[k]; });
+          }
+          ['prix_vente', 'commission', 'port', 'emballage', 'acrylique_facture', 'acrylique_cout'].forEach(function (k) { sale[k] = num(p.vente[k]); });
+          sale.plateforme = p.vente.plateforme || '';
+          if (filled(p.vente.date_vente)) { sale.date_vente = p.vente.date_vente; }
+          return { ok: true };
+        }
+        case 'cancelSale': {
+          var gone = saleById(p.id);
+          var undo = saleUndoContext(gone, db.articles);
+          if (undo.reason) { throw new Error('Impossible d\'annuler la vente : ' + undo.reason); }
+          undoSale(undo.a, gone, undo.removed);
+          db.ventes = db.ventes.filter(function (x) { return x.id !== p.id; });
           return { ok: true };
         }
         case 'savePrix': {
@@ -281,7 +349,7 @@
   function renderNav() {
     var stock = S.data.articles.filter(inStock);
     var counts = { stock: stock.length, archives: S.data.ventes.length, bilan: '', prix: S.data.prix.length, ajout: '' };
-    var active = current === 'fiche' ? 'stock' : (current === 'modifier' || current === 'vendre' ? 'ajout' : current);
+    var active = current === 'fiche' ? 'stock' : (current === 'modifier' || current === 'vendre' ? 'ajout' : (current === 'vente' ? 'archives' : current));
     var html = function (useShort) {
       return NAV.map(function (n) {
         return '<a class="nav-item" href="#' + n.id + '"' + (n.id === active ? ' aria-current="page"' : '') + '>' +
@@ -323,7 +391,7 @@
     var id = parts[1];
     current = view;
     S.confirmDelete = false;
-    if (view !== 'ajout' && view !== 'modifier' && view !== 'vendre') { S.form = null; }
+    if (view !== 'ajout' && view !== 'modifier' && view !== 'vendre' && view !== 'vente') { S.form = null; }
     renderNav();
     switch (view) {
       case 'archives': viewArchives(); break;
@@ -333,6 +401,7 @@
       case 'ajout': viewForm('ajout'); break;
       case 'modifier': viewForm('modifier', id); break;
       case 'vendre': viewForm('vendre', id); break;
+      case 'vente': viewSaleForm(id); break;
       default: current = 'stock'; viewStock();
     }
     window.scrollTo(0, 0);
@@ -514,8 +583,9 @@
     }
     var name = function (v) { return v.nom + (num(v.qte) > 1 ? ' ×' + num(v.qte) : ''); };
     var acr = function (v) { return num(v.acrylique_facture) ? 'dont acrylique ' + eur(num(v.acrylique_facture)) : 'sans acrylique'; };
+    var edit = function (v) { return '<a class="btn" href="#vente/' + esc(v.id) + '" aria-label="' + esc('Modifier la vente : ' + name(v)) + '">Modifier</a>'; };
     var table = '<div class="table-wrap only-desktop"><div class="table">' +
-      '<div class="trow thead t-sales"><span>Article</span><span>Vendu</span><span>Prix de revient</span><span>Prix de vente</span><span>Frais de vente</span><span>Gain net</span></div>' +
+      '<div class="trow thead t-sales"><span>Article</span><span>Vendu</span><span>Prix de revient</span><span>Prix de vente</span><span>Frais de vente</span><span>Gain net</span><span class="sr">Actions</span></div>' +
       rows.map(function (v) {
         var n = saleNet(v);
         return '<div class="trow t-sales">' +
@@ -524,7 +594,7 @@
           '<span class="num">' + eur(num(v.prix_revient)) + '</span>' +
           '<div class="cell"><span class="num">' + eur(saleCash(v)) + '</span><span class="small muted">' + acr(v) + '</span></div>' +
           '<div class="cell"><span class="num">' + eur(saleFees(v)) + '</span><span class="small muted">' + esc(saleFeesText(v)) + '</span></div>' +
-          '<div class="cell">' + diffHtml(n) + '<span class="small muted">' + pct(n, num(v.prix_revient)) + '</span></div></div>';
+          '<div class="cell">' + diffHtml(n) + '<span class="small muted">' + pct(n, num(v.prix_revient)) + '</span></div>' + edit(v) + '</div>';
       }).join('') + '</div></div>';
     var cards = '<div class="cards only-compact">' + rows.map(function (v) {
       return '<article class="card"><div class="card-top"><div class="cell"><span class="strong">' + esc(name(v)) + '</span>' +
@@ -532,7 +602,7 @@
         '<div class="card-figs"><div class="cell"><span class="label-sm">Revient</span><span class="num">' + eur(num(v.prix_revient)) + '</span></div>' +
         '<div class="cell"><span class="label-sm">Vente</span><span class="num">' + eur(saleCash(v)) + '</span></div>' +
         '<div class="cell"><span class="label-sm">Frais</span><span class="num">' + eur(saleFees(v)) + '</span></div></div>' +
-        '<div class="card-foot"><span class="small muted">' + acr(v) + ' · ' + esc(saleFeesText(v)) + '</span></div></article>';
+        '<div class="card-foot"><span class="small muted">' + acr(v) + ' · ' + esc(saleFeesText(v)) + '</span>' + edit(v) + '</div></article>';
     }).join('') + '</div>';
     $('#arch-results').innerHTML = table + cards;
   }
@@ -853,9 +923,47 @@
     renderForm();
   }
 
+  /** Correction d'une vente déjà enregistrée : seul le bloc Vente est affiché, prérempli. */
+  function viewSaleForm(id) {
+    var sale = S.data.ventes.filter(function (x) { return String(x.id) === String(id); })[0];
+    if (!sale) {
+      setHead('Introuvable', 'Modifier la vente');
+      V.innerHTML = '<section class="panel"><p class="empty">Cette vente n\'existe plus.</p><div class="btn-row"><a class="btn" href="#archives">Retour aux archives</a></div></section>';
+      return;
+    }
+    var q = Math.max(1, Math.round(num(sale.qte)));
+    var money = function (x) { return num(x) ? toInput(round2(num(x))) : ''; };
+    var v = {
+      vente_prix: money(num(sale.prix_vente) / q), vente_qte: String(q), vente_date: sale.date_vente || todayISO(),
+      vente_plateforme: sale.plateforme || 'Autre', vente_commission: money(sale.commission), vente_port: money(sale.port), vente_emballage: money(sale.emballage),
+      acrylique: num(sale.acrylique_facture) || num(sale.acrylique_cout) ? 'Oui' : 'Non', acrylique_facture: money(sale.acrylique_facture), acrylique_cout: money(sale.acrylique_cout)
+    };
+    // L'article tel qu'il était avant cette vente, pour recalculer le prix de revient si la quantité change
+    var ctx = saleUndoContext(sale, S.data.articles);
+    var before = null;
+    if (!ctx.reason) { before = JSON.parse(JSON.stringify(ctx.a)); undoSale(before, sale, ctx.removed); }
+    S.form = {
+      mode: 'vente', id: sale.id, v: v, errors: [], busy: false, confirmCancel: false,
+      sale: { row: sale, qte: q, total: num(sale.prix_vente), unitInput: v.vente_prix, before: before, stock: before ? qtyOf(before) : q, reason: ctx.reason || '' }
+    };
+    setHead(sale.nom, 'Modifier la vente');
+    renderForm();
+  }
+
   function fieldDefs(v) {
-    var I = function (key, label, o) { o = o || {}; return { kind: 'input', key: key, label: label, money: !!o.money, type: o.type || 'text', ph: o.ph || '', full: !!o.full, mode: o.mode || (o.money ? 'decimal' : '') }; };
+    var I = function (key, label, o) { o = o || {}; return { kind: 'input', key: key, label: label, money: !!o.money, type: o.type || 'text', ph: o.ph || '', full: !!o.full, ro: !!o.ro, mode: o.mode || (o.money ? 'decimal' : '') }; };
     var C = function (key, label, options) { return { kind: 'choice', key: key, label: label, options: options, full: true }; };
+    var frozen = S.form.mode === 'vente' ? S.form.sale.reason : '';
+    var saleSection = { title: 'Vente', hint: frozen ? 'Quantité figée : ' + frozen : 'Le gain net déduit le prix de revient des pièces vendues et tous les frais de vente.', fields: [
+      I('vente_prix', 'Prix de vente unitaire', { money: true }), I('vente_qte', 'Quantité vendue', { mode: 'numeric', ph: '1', ro: !!frozen }),
+      { kind: 'total', key: 'vente_total', label: 'Total de la vente', full: true },
+      I('vente_date', 'Date de vente', { type: 'date', full: true }),
+      C('vente_plateforme', 'Vendu où', ['Vinted', 'Cardmarket', 'Main propre', 'Autre']),
+      I('vente_commission', 'Commission', { money: true }), I('vente_port', 'Port à ta charge', { money: true }),
+      I('vente_emballage', 'Emballage', { money: true }),
+      C('acrylique', 'Acrylique de protection', ['Non', 'Oui'])
+    ].concat(v.acrylique === 'Oui' ? [I('acrylique_facture', 'Supplément facturé', { money: true }), I('acrylique_cout', "Coût de l'acrylique", { money: true })] : []) };
+    if (S.form.mode === 'vente') { return [saleSection]; }
     var graded = v.grading_societe !== 'Aucune';
     var etbOptions = [''].concat(S.data.prix.map(function (p) { return p.extension; }));
     var isEtbCandidate = v.type === 'Scellé' && v.licence === 'Pokémon' && S.data.prix.length > 0;
@@ -879,7 +987,7 @@
         I('frais_service', 'Frais de service', { money: true, ph: 'protection acheteur...' })
       ] },
       { title: 'Grading', hint: graded ? 'Tous les frais du grading entrent dans le prix de revient.' : 'Choisis une société si la carte est gradée ou partie au grading.', fields: [
-        C('grading_societe', 'Société', ['Aucune', 'PSA', 'Beckett', 'CGC', 'PCA'])
+        C('grading_societe', 'Société', ['Aucune', 'PSA', 'Beckett', 'CGC', 'PCA', 'CCC'])
       ].concat(graded ? [
         I('grading_note', 'Note obtenue', { ph: 'en attente' }), I('grading_certificat', 'N° de certificat'),
         I('grading_frais', 'Frais de grading', { money: true }), I('grading_envoi', 'Envoi aller', { money: true }),
@@ -897,21 +1005,15 @@
         I('rangement', 'Rangé où', { full: true, ph: 'Classeur, boîte, page...' }), I('note', 'Note', { full: true })
       ]) }
     ];
-    if (v.statut === 'Vendu') {
-      sections.push({ title: 'Vente', hint: 'Le gain net déduit le prix de revient des pièces vendues et tous les frais de vente.', fields: [
-        I('vente_prix', 'Prix de vente total', { money: true }), I('vente_qte', 'Quantité vendue', { mode: 'numeric', ph: '1' }),
-        I('vente_date', 'Date de vente', { type: 'date', full: true }),
-        C('vente_plateforme', 'Vendu où', ['Vinted', 'Cardmarket', 'Main propre', 'Autre']),
-        I('vente_commission', 'Commission', { money: true }), I('vente_port', 'Port à ta charge', { money: true }),
-        I('vente_emballage', 'Emballage', { money: true }),
-        C('acrylique', 'Acrylique de protection', ['Non', 'Oui'])
-      ].concat(v.acrylique === 'Oui' ? [I('acrylique_facture', 'Supplément facturé', { money: true }), I('acrylique_cout', "Coût de l'acrylique", { money: true })] : []) });
-    }
+    if (v.statut === 'Vendu') { sections.push(saleSection); }
     return sections;
   }
 
   function renderField(f, v) {
     var full = f.full ? ' full' : '';
+    if (f.kind === 'total') {
+      return '<div class="field' + full + '"><span class="label-sm">' + esc(f.label) + '</span><span class="small muted" id="calc-sale-total" aria-live="polite"></span></div>';
+    }
     if (f.kind === 'choice') {
       var gid = 'f-' + f.key;
       return '<div class="field' + full + '"><span id="' + gid + '" class="label-sm">' + esc(f.label) + '</span><div class="choices" role="group" aria-labelledby="' + gid + '">' +
@@ -922,16 +1024,19 @@
         f.options.map(function (o) { return '<option value="' + esc(o) + '"' + (v[f.key] === o ? ' selected' : '') + '>' + esc(o || 'Non, prix saisi à la main') + '</option>'; }).join('') + '</select></div></div>';
     }
     return '<div class="field' + full + '"><label for="f-' + f.key + '" class="label-sm">' + esc(f.label) + '</label><div class="input-box">' +
-      '<input id="f-' + f.key + '" data-key="' + f.key + '" type="' + f.type + '"' + (f.mode ? ' inputmode="' + f.mode + '"' : '') + ' value="' + esc(v[f.key]) + '" placeholder="' + esc(f.ph) + '">' +
+      '<input id="f-' + f.key + '" data-key="' + f.key + '" type="' + f.type + '"' + (f.mode ? ' inputmode="' + f.mode + '"' : '') + ' value="' + esc(v[f.key]) + '" placeholder="' + esc(f.ph) + '"' + (f.ro ? ' readonly' : '') + '>' +
       (f.money ? '<span class="unit" aria-hidden="true">€</span>' : '') + '</div></div>';
   }
 
   function renderForm() {
     var F = S.form, v = F.v;
     var y = window.scrollY;
+    var editSale = F.mode === 'vente';
+    var back = editSale ? '#archives' : (F.id ? '#fiche/' + esc(F.id) : '#stock');
     V.innerHTML =
       (F.errors.length ? '<div class="form-errors" role="alert" id="form-errors">À corriger avant d\'enregistrer :<ul>' + F.errors.map(function (e) { return '<li>' + esc(e) + '</li>'; }).join('') + '</ul></div>' : '') +
-      '<p class="intro">Les frais laissés vides comptent pour zéro. Tout est enregistré dans le Google Sheet.</p>' +
+      '<p class="intro">' + (editSale && !F.sale.reason ? 'Le stock de l\'article et le prix de revient de la vente sont recalculés à l\'enregistrement. ' : '') +
+        'Les frais laissés vides comptent pour zéro. Tout est enregistré dans le Google Sheet.</p>' +
       '<form id="item-form" novalidate><div class="form-sections">' + fieldDefs(v).map(function (s) {
         return '<section class="panel"><div class="cell" style="gap:2px"><h2 class="h3">' + esc(s.title) + '</h2>' + (s.hint ? '<p class="small muted" style="margin:0">' + esc(s.hint) + '</p>' : '') + '</div>' +
           '<div class="fields">' + s.fields.map(function (f) { return renderField(f, v); }).join('') + '</div></section>';
@@ -939,9 +1044,19 @@
       '<section class="calc" aria-label="Calcul" style="margin-top:var(--gap)"><div class="kpi"><span class="label">Prix de revient</span><span class="kpi-value" id="calc-cost"></span><span class="sm" id="calc-fees" style="color:var(--side-label)"></span></div>' +
         '<div class="kpi"><span class="label" id="calc-label"></span><span class="kpi-value amber" id="calc-result"></span></div>' +
         '<div class="btn-row"><button type="submit" class="btn btn-amber btn-lg"' + (F.busy ? ' disabled' : '') + '>' + (F.busy ? 'Enregistrement...' : 'Enregistrer') + '</button>' +
-        '<a class="btn btn-lg" style="color:var(--side-ink);border-color:var(--side-line)" href="' + (F.id ? '#fiche/' + esc(F.id) : '#stock') + '">Annuler</a></div></section></form>';
+        '<a class="btn btn-lg" style="color:var(--side-ink);border-color:var(--side-line)" href="' + back + '">' + (editSale ? 'Retour' : 'Annuler') + '</a></div></section></form>' +
+      (editSale ? '<div id="cancel-sale-zone" style="margin-top:var(--gap)">' + cancelSaleZone() + '</div>' : '');
     updateCalc();
     window.scrollTo(0, y);
+  }
+
+  function cancelSaleZone() {
+    var F = S.form;
+    if (F.sale.reason) { return '<p class="small muted" style="margin:0">Annulation impossible : ' + esc(F.sale.reason) + '</p>'; }
+    if (!F.confirmCancel) { return '<button type="button" class="btn btn-danger" data-action="ask-cancel-sale" style="width:100%">Annuler cette vente</button>'; }
+    return '<div class="confirm"><p>Annuler cette vente ? Elle disparaît des archives et ' + esc(plural(F.sale.qte, 'pièce revient', 'pièces reviennent')) + ' dans le stock.</p>' +
+      '<button type="button" class="btn btn-danger" data-action="confirm-cancel-sale">Oui, annuler la vente</button>' +
+      '<button type="button" class="btn" data-action="keep-sale">Non, la garder</button></div>';
   }
 
   function formArticle(v) {
@@ -957,17 +1072,51 @@
     return o;
   }
 
+  /** Le formulaire saisit un prix unitaire ; le Sheet stocke le total (prix unitaire x quantité vendue). */
+  function saleQty(v, stock) { return Math.min(stock, Math.max(1, Math.round(num(v.vente_qte)) || 1)); }
+  function saleTotal(v, stock) { return round2(num(v.vente_prix) * saleQty(v, stock)); }
+  function saleFormNet(v, total, cost) {
+    var r = total - num(v.vente_commission) - num(v.vente_port) - num(v.vente_emballage) - cost;
+    if (v.acrylique === 'Oui') { r += num(v.acrylique_facture) - num(v.acrylique_cout); }
+    return r;
+  }
+  function salePayload(v, total) {
+    return {
+      qte: Math.round(num(v.vente_qte)), prix_vente: total, commission: num(v.vente_commission), port: num(v.vente_port),
+      emballage: num(v.vente_emballage), acrylique_facture: v.acrylique === 'Oui' ? num(v.acrylique_facture) : 0,
+      acrylique_cout: v.acrylique === 'Oui' ? num(v.acrylique_cout) : 0, plateforme: v.vente_plateforme, date_vente: v.vente_date
+    };
+  }
+  /** Chiffres d'une vente en cours de correction. Prix et quantité inchangés : on garde le total enregistré au centime près. */
+  function editedSale(v) {
+    var s = S.form.sale;
+    var q = saleQty(v, s.stock);
+    var total = v.vente_prix === s.unitInput && q === s.qte ? s.total : saleTotal(v, s.stock);
+    var cost = s.before ? round2(costOf(s.before) / s.stock * q) : num(s.row.prix_revient);
+    return { qte: q, total: total, cost: cost };
+  }
+
   function updateCalc() {
     var v = S.form.v;
+    if (S.form.mode === 'vente') {
+      var es = editedSale(v);
+      $('#calc-sale-total').textContent = eur(num(v.vente_prix)) + ' × ' + es.qte + ' = ' + eur(es.total);
+      $('#calc-cost').textContent = eur(es.cost);
+      $('#calc-fees').textContent = 'pour ' + plural(es.qte, 'pièce vendue', 'pièces vendues');
+      $('#calc-label').textContent = 'Gain net sur la vente';
+      $('#calc-result').textContent = signed(saleFormNet(v, es.total, es.cost));
+      return;
+    }
     var a = formArticle(v);
     var cost = costOf(a);
     var fees = feesOf(a);
     var q = qtyOf(a);
     var result, label;
     if (v.statut === 'Vendu') {
-      var vq = Math.min(q, Math.max(1, Math.round(num(v.vente_qte)) || 1));
-      result = num(v.vente_prix) - num(v.vente_commission) - num(v.vente_port) - num(v.vente_emballage) - cost / q * vq;
-      if (v.acrylique === 'Oui') { result += num(v.acrylique_facture) - num(v.acrylique_cout); }
+      var vq = saleQty(v, q);
+      var total = saleTotal(v, q);
+      $('#calc-sale-total').textContent = eur(num(v.vente_prix)) + ' × ' + vq + ' = ' + eur(total);
+      result = saleFormNet(v, total, cost / q * vq);
       label = 'Gain net sur la vente';
     } else {
       result = unitPriceOf(a) * q - cost;
@@ -981,15 +1130,20 @@
 
   function validate(v) {
     var e = [];
-    if (!filled(v.nom)) { e.push('Le nom de l\'article est obligatoire.'); }
-    if (!filled(v.prix_unitaire) || num(v.prix_unitaire) < 0) { e.push('Indique le prix unitaire payé (0 si c\'était un cadeau).'); }
-    if (!(Math.round(num(v.qte)) >= 1)) { e.push('La quantité doit être d\'au moins 1.'); }
-    if (!parseISO(v.date_achat)) { e.push('Indique la date d\'achat, elle sert au bilan.'); }
-    if (filled(v.lien_cardmarket) && !/^https:\/\/(www\.)?cardmarket\.com\//.test(v.lien_cardmarket.trim())) { e.push('Le lien Cardmarket doit commencer par https://www.cardmarket.com/'); }
-    MONEY_KEYS.forEach(function (k) { if (filled(v[k]) && isNaN(parseFloat(String(v[k]).replace(',', '.')))) { e.push('Montant illisible dans un des champs (' + k.replace(/_/g, ' ') + ').'); } });
-    if (v.statut === 'Vendu') {
-      var q = Math.round(num(v.qte));
-      if (!filled(v.vente_prix)) { e.push('Indique le prix de vente.'); }
+    var editSale = S.form.mode === 'vente';
+    if (!editSale) {
+      if (!filled(v.nom)) { e.push('Le nom de l\'article est obligatoire.'); }
+      if (!filled(v.prix_unitaire) || num(v.prix_unitaire) < 0) { e.push('Indique le prix unitaire payé (0 si c\'était un cadeau).'); }
+      if (!(Math.round(num(v.qte)) >= 1)) { e.push('La quantité doit être d\'au moins 1.'); }
+      if (!parseISO(v.date_achat)) { e.push('Indique la date d\'achat, elle sert au bilan.'); }
+      if (filled(v.lien_cardmarket) && !/^https:\/\/(www\.)?cardmarket\.com\//.test(v.lien_cardmarket.trim())) { e.push('Le lien Cardmarket doit commencer par https://www.cardmarket.com/'); }
+    }
+    MONEY_KEYS.forEach(function (k) { if (k !== 'vente_prix' && filled(v[k]) && isNaN(parseFloat(String(v[k]).replace(',', '.')))) { e.push('Montant illisible dans un des champs (' + k.replace(/_/g, ' ') + ').'); } });
+    if (v.statut === 'Vendu' || editSale) {
+      // En correction, le maximum est le stock de l'article avant cette vente
+      var q = editSale ? S.form.sale.stock : Math.round(num(v.qte));
+      if (!filled(v.vente_prix)) { e.push('Indique le prix de vente unitaire.'); }
+      else if (isNaN(parseFloat(String(v.vente_prix).replace(/\s/g, '').replace(',', '.')))) { e.push('Le prix de vente unitaire est illisible (ex. 12,50 ou 12.50).'); }
       if (!(Math.round(num(v.vente_qte)) >= 1 && Math.round(num(v.vente_qte)) <= q)) { e.push('La quantité vendue doit être entre 1 et ' + q + '.'); }
       if (!parseISO(v.vente_date)) { e.push('Indique la date de vente.'); }
     }
@@ -1000,6 +1154,7 @@
     var F = S.form, v = F.v;
     F.errors = validate(v);
     if (F.errors.length) { renderForm(); var box = $('#form-errors'); if (box) { box.scrollIntoView({ block: 'start' }); } return; }
+    if (F.mode === 'vente') { submitSaleEdit(); return; }
     var article = formArticle(v);
     article.id = F.id || '';
     var selling = v.statut === 'Vendu';
@@ -1011,17 +1166,32 @@
       .then(function (res) {
         savedId = res.id;
         if (!selling) { return null; }
-        return call('sellArticle', { id: savedId, vente: {
-          qte: Math.round(num(v.vente_qte)), prix_vente: num(v.vente_prix), commission: num(v.vente_commission), port: num(v.vente_port),
-          emballage: num(v.vente_emballage), acrylique_facture: v.acrylique === 'Oui' ? num(v.acrylique_facture) : 0,
-          acrylique_cout: v.acrylique === 'Oui' ? num(v.acrylique_cout) : 0, plateforme: v.vente_plateforme, date_vente: v.vente_date
-        } });
+        return call('sellArticle', { id: savedId, vente: salePayload(v, saleTotal(v, Math.round(num(article.qte)))) });
       })
       .then(reload)
       .then(function () {
         S.form = null;
         toast(selling ? 'Vente enregistrée.' : 'Article enregistré.');
         location.hash = selling ? 'archives' : 'fiche/' + savedId;
+      })
+      .catch(function (err) {
+        if (!S.form) { return; }
+        F.busy = false;
+        F.errors = [err.message];
+        if (S.token) { renderForm(); }
+      });
+  }
+
+  function submitSaleEdit() {
+    var F = S.form, v = F.v;
+    F.busy = true;
+    renderForm();
+    call('updateSale', { id: F.id, vente: salePayload(v, editedSale(v).total) })
+      .then(reload)
+      .then(function () {
+        S.form = null;
+        toast('Vente modifiée.');
+        location.hash = 'archives';
       })
       .catch(function (err) {
         if (!S.form) { return; }
@@ -1066,6 +1236,18 @@
     if (action === 'csv') { exportCsv(); return; }
     if (action === 'ask-delete') { S.confirmDelete = true; $('#delete-zone').innerHTML = deleteZone(); return; }
     if (action === 'cancel-delete') { S.confirmDelete = false; $('#delete-zone').innerHTML = deleteZone(); return; }
+    if (action === 'ask-cancel-sale' && S.form) { S.form.confirmCancel = true; $('#cancel-sale-zone').innerHTML = cancelSaleZone(); return; }
+    if (action === 'keep-sale' && S.form) { S.form.confirmCancel = false; $('#cancel-sale-zone').innerHTML = cancelSaleZone(); return; }
+    if (action === 'confirm-cancel-sale' && S.form && !S.form.busy) {
+      var saleId = S.form.id;
+      t.disabled = true;
+      call('cancelSale', { id: saleId }).then(reload).then(function () {
+        S.form = null;
+        toast('Vente annulée, pièces remises en stock.');
+        location.hash = 'archives';
+      }).catch(function (err) { toast(err.message, true); t.disabled = false; });
+      return;
+    }
     if (action === 'confirm-delete') {
       var id = (location.hash.split('/')[1] || '');
       t.disabled = true;

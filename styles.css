@@ -266,7 +266,8 @@ a { color: inherit; }
 .trow { display: grid; gap: 16px; padding: 13px 0; border-bottom: 1px solid var(--row); align-items: center; }
 .thead { padding: 8px 0; border-bottom: 1px solid var(--line); font-family: var(--f-mono); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted); }
 .t-stock { grid-template-columns: minmax(230px, 2.3fr) minmax(120px, 1fr) minmax(190px, 1.6fr) minmax(130px, 1.1fr) minmax(110px, 1fr) minmax(110px, 0.9fr); }
-.t-sales { grid-template-columns: minmax(220px, 2.1fr) minmax(140px, 1.2fr) minmax(110px, 1fr) minmax(130px, 1.1fr) minmax(170px, 1.5fr) minmax(110px, 0.9fr); }
+.t-sales { grid-template-columns: minmax(220px, 2.1fr) minmax(140px, 1.2fr) minmax(110px, 1fr) minmax(130px, 1.1fr) minmax(170px, 1.5fr) minmax(110px, 0.9fr) minmax(96px, 0.6fr); }
+.card-foot .btn { margin-top: 8px; }
 .cell { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .link-btn { padding: 0; border: 0; background: transparent; font-weight: 600; font-size: 15px; text-align: left; }
 .link-btn:hover { text-decoration: underline; }
